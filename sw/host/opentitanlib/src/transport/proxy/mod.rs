@@ -281,6 +281,15 @@ impl ProxyOps for ProxyOpsImpl {
             _ => bail!(ProxyError::UnexpectedReply()),
         }
     }
+
+    fn apply_default_configuration_with_strap(&self, strapping_name: &str) -> Result<()> {
+        match self.execute_command(ProxyRequest::ApplyDefaultConfiguration {
+            strapping_name: strapping_name.to_string(),
+        })? {
+            ProxyResponse::ApplyDefaultConfiguration => Ok(()),
+            _ => bail!(ProxyError::UnexpectedReply()),
+        }
+    }
 }
 
 impl Transport for Proxy {

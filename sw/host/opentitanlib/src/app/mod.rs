@@ -23,7 +23,7 @@ use crate::transport::{
     TransportInterfaceType,
 };
 
-use anyhow::{bail, ensure, Result};
+use anyhow::{anyhow, bail, ensure, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use serde_annotate::Annotate;
 use std::any::Any;
@@ -825,7 +825,16 @@ impl TransportWrapper {
     }
 
     /// Apply given configuration to a all the given pins.
-    fn apply_pin_configurations(&self, conf_map: &HashMap<String, PinConfiguration>) -> Result<()> {
+    fn apply_pin_configurations(
+        &self,
+        conf_map: &HashMap<String, PinConfiguration>,
+        overrides: Option<&HashMap<String, PinConfiguration>>,
+    ) -> Result<()> {
+        // If the overrides map specify a pin, then use it instead
+        let update_pin = |name, conf| {
+            let conf = overrides.map(|o| o.get(name)).flatten().unwrap_or(conf);
+            self.apply_pin_configuration(name, conf)
+        };
         // Pins on IO expanders will rely on some "direct" pins being configured for I2C and
         // possibly MUX strappings.  To account for that, first apply the configuration to all
         // "direct" (non-artificial) pins, and then to the rest.  (In theory, an IO expander could
@@ -834,12 +843,12 @@ impl TransportWrapper {
         // `TransportWrapperBuilder.build()` would probably be appropriate.)
         for (name, conf) in conf_map {
             if !self.artificial_pin_map.contains_key(name) {
-                self.apply_pin_configuration(name, conf)?;
+                update_pin(name, conf)?;
             }
         }
         for (name, conf) in conf_map {
             if self.artificial_pin_map.contains_key(name) {
-                self.apply_pin_configuration(name, conf)?;
+                update_pin(name, conf)?;
             }
         }
         Ok(())
@@ -847,10 +856,28 @@ impl TransportWrapper {
 
     /// Configure all pins as input/output, pullup, etc. as declared in configuration files.
     /// Also configure SPI port mode/speed, and other similar settings.
-    pub fn apply_default_configuration(&self) -> Result<()> {
-        self.transport.apply_default_configuration()?;
-        self.apply_pin_configurations(&self.pin_conf_map)?;
-        Ok(())
+    pub fn apply_default_configuration(&self, strapping_name: Option<&str>) -> Result<()> {
+        if let Some(strapping_name) = strapping_name {
+            if self.capabilities()?.request(Capability::PROXY).ok().is_ok() {
+                self.proxy_ops()?
+                    .apply_default_configuration_with_strap(strapping_name)
+            } else if let Some(strapping_conf_map) = self.strapping_conf_map.get(strapping_name) {
+                // Apply the debugger's default pin configuration (e.g. hyperdebug pin set to HighZ)
+                self.transport.apply_default_configuration()?;
+                // Then apply all of the configuration specify pin configuration, these defaults are
+                // typically specific to a certain logical chip (not debugger/interface)
+                // configuration. Apply the named gpio strap as an override to the normal default
+                // configuration.
+                self.apply_pin_configurations(&self.pin_conf_map, Some(strapping_conf_map))
+            } else {
+                Err(anyhow!(TransportError::InvalidStrappingName(
+                    strapping_name.to_string(),
+                )))
+            }
+        } else {
+            self.transport.apply_default_configuration()?;
+            self.apply_pin_configurations(&self.pin_conf_map, None)
+        }
     }
 
     pub fn reset_target(&self, reset_delay: Duration, clear_uart_rx: bool) -> Result<()> {
